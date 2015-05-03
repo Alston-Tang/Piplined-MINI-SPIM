@@ -95,18 +95,30 @@ architecture arch_processor_core of processor_core is
 -- IF/ID Signals --
 	signal pcNext		:	unsigned(31 downto 0);
 	signal pc		:	unsigned(31 downto 0);
+	signal instOp, if_id_func	
+				:	std_logic_vector(5 downto 0);
+	signal rsaddr, rtaddr, rdaddr
+				:	std_logic_vector(4 downto 0);
+	signal if_id_regwen, if_id_memreg, if_id_branch, if_id_memwen
+				:	std_logic;
+	signal if_id_aluop		:	std_logic_vector(1 downto 0);
+
 -- ID/EX Signals --
-	signal func, instOp		:	std_logic_vector(5 downto 0);
+	signal inputBt			:	std_logic_vector(31 downto 0);
 	signal iext, iextshf, jextshf	:	std_logic_vector(31 downto 0);
-	signal id_ex_regwen, id_ex_memreg		
+	signal id_ex_regwen, id_ex_memreg, id_ex_memwrite, id_ex_branch, id_ex_memwen		
 					:	std_logic;
 	signal id_ex_regwaddr		:	std_logic_vector(4 downto 0);
+	signal func			: 	std_logic_vector(5 downto 0);
+	signal id_ex_regdrB		:	std_logic_vector(31 downto 0);
 -- EX/MEM Signals
 	signal branchTar	:	unsigned(31 downto 0);
-	signal ex_mem_regwen, ex_mem_memreg	
+	signal ex_mem_regwen
 				:	std_logic;
 	signal ex_mem_regwaddr	:	std_logic_vector(4 downto 0);
 	signal ex_mem_res	:	std_logic_vector(31 downto 0);
+-- MEM/WB Signals
+
 begin
 	-- Reg Table Map
 	REG:	regtable
@@ -129,13 +141,13 @@ begin
 	port map(
 		instOp	=>	instOp,
 		regDst	=>	regDst,
-		aluSrc	=>	aluSrc,
-		memReg	=>	id_ex_memreg,
-		regWr	=>	id_ex_regwen,
-		branch	=>	branch,
-		memWrite=>	memWrite,
+		aluSrc	=>	alusrc,
+		memReg	=>	if_id_memreg,
+		regWr	=>	if_id_regwen,
+		branch	=>	if_id_branch,
+		memWrite=>	if_id_memwen,
 		jump	=>	jump,
-		aluOp	=>	aluOp,
+		aluOp	=>	if_id_aluop,
 		excep	=>	contrExcep
 	);
 	
@@ -177,49 +189,41 @@ begin
 	end process;
 	-- ID --
 	process(clk)
-	variable rsaddr, rtaddr, rdaddr	:	std_logic_vector(4 downto 0);
-	variable funcv, instOpv		:	std_logic_vector(5 downto 0);
 	variable ioriv			:	std_logic_vector(15 downto 0);
 	variable joriv			:	std_logic_vector(25 downto 0);
-	variable jextshfv		:	std_logic_vector(31 downto 0);
 	begin
 		if running = '1' and rising_edge(clk) then
-			instOpv := inst(31 downto 26);
-			rsaddr := inst(25 downto 21);
-			rtaddr := inst(20 downto 16);
-			rdaddr := inst(15 downto 11);
-			funcv := inst(5 downto 0);
-			ioriv := inst(15 downto 0);
-			joriv := inst(25 downto 0);
-			
-			instOp <= instOpv;
-			func <= funcv;
-			regraddrA <= rsaddr;
-			regraddrB <= rtaddr;
-			id_ex_regwaddr <= rdaddr;
-			iext <= std_logic_vector(resize(signed(ioriv), 32));
-			iextshf <= std_logic_vector(resize(signed(ioriv & "00"), 32));
-			jextshf(31 downto 28) <= std_logic_vector(pcNext(31 downto 28));
-			jextshf(27 downto 2) <= joriv;
-			jextshf(1 downto 0) <= "00";
+			func <= if_id_func;
+			aluOp <= if_id_aluop;
+			inputA <= regdrA;
+			inputB <= inputBt;
+			id_ex_regwen <= if_id_regwen;
+			id_ex_memwen <= if_id_memwen;
+			id_ex_memreg <= if_id_memreg;
+			id_ex_branch <= if_id_branch;
+			id_ex_regwen <= if_id_regwen;
+			id_ex_regdrB <= regdrB;
 		end if;
 	end process;
 	-- EX --
 	process(clk)
 	begin
 		if running = '1' and rising_edge(clk) then
+			memwen <= id_ex_memwen;
+			memaddr <= res;
+			memdw <= id_ex_regdrB;
+
 			ex_mem_regwen <= id_ex_regwen;
 			memReg <= id_ex_memreg;
 			ex_mem_regwaddr <= id_ex_regwaddr;
-			ex_mem_res	<= res;
+			ex_mem_res <= res;
+			
 		end if;
 	end process;
 	-- MEM --
 	process(clk)
 	begin
 		if running = '1' and rising_edge(clk) then
-			memaddr <= res;
-			memwen	<= memWrite;
 			regwen <= ex_mem_regwen;
 			regwaddr <= ex_mem_regwaddr;
 		end if;
@@ -241,16 +245,42 @@ begin
 	process(aluSrc, regdrB, iext)
 	begin
 		if aluSrc = '1' then
-			inputB <= iext;
+			inputBt <= iext;
 		else
-			inputB <= regdrB;
+			inputBt <= regdrB;
 		end if;
 	end process;
-	-- Input A Pass --
-	process(regdrA)
+	-- Decoding --
+	process(inst)
 	begin
-		inputA <= regdrA;
+		instOp <= inst(31 downto 26);
+		rsaddr <= inst(25 downto 21);
+		rtaddr <= inst(20 downto 16);
+		rdaddr <= inst(15 downto 11);
+		if_id_func <= inst(5 downto 0);
 	end process;
+	-- Sign Extent --
+	process(inst)
+	variable ioriv	:	std_logic_vector(15 downto 0);
+	variable joriv	:	std_logic_vector(25 downto 0);
+	begin
+		ioriv := inst(15 downto 0);
+		joriv := inst(25 downto 0);
+		iext <= std_logic_vector(resize(signed(ioriv), 32));
+		iextshf <= std_logic_vector(resize(signed(ioriv & "00"), 32));
+		jextshf(31 downto 28) <= std_logic_vector(pcNext(31 downto 28));
+		jextshf(27 downto 2) <= joriv;
+		jextshf(1 downto 0) <= "00";
+	end process;
+	-- Reg Read Addr Pass --
+	process(rsaddr)
+	begin
+		regraddrA <= rsaddr;
+	end process;
+	process(rtaddr)
+	begin
+		regraddrB <= rtaddr;
+	end process;	
 	-- PC Src Mutex --
 	process(branch, zero, iextshf, pcNext)
 	begin
@@ -266,7 +296,16 @@ begin
 		if memReg = '1' then
 			regdw <= memdr;
 		else
-			regdw <= res;
+			regdw <= ex_mem_res;
+		end if;
+	end process;
+	-- Reg Dst Mutex --
+	process(regDst, rtaddr, rdaddr)
+	begin
+		if regDst = '0' then
+			id_ex_regwaddr <= rtaddr;
+		else
+			id_ex_regwaddr <= rdaddr;
 		end if;
 	end process;
 			
